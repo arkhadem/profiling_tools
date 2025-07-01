@@ -33,3 +33,6 @@ To start/end MICA instrumentation before/after your Region of Interest (ROI), co
 
 You can use the following command to run the Pin and application together:
 
+```bash
+$PIN_ROOT/pin -t $PIN_ROOT/MICA/obj-intel64/mica.so itypes hierarchical -- ./example
+```
