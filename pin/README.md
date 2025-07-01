@@ -2,24 +2,34 @@
 
 ## Install Intel Pin
 
-1- Download Intel Pin (.tar.gz file) [from here](https://www.intel.com/content/www/us/en/developer/articles/tool/pin-a-binary-instrumentation-tool-downloads.html).
+1- Download Intel Pin (.tar.gz file) [from here](https://www.intel.com/content/www/us/en/developer/articles/tool/pin-a-binary-instrumentation-tool-downloads.html) and extract it.
 
-2- Extract the file using ``. Replace `/path/to/pin/` with your desired Intel Pin path.
+2- Copy the MICA directory from this repository and directory to the Pin root.
 
-3- Copy the MICA directory from here to the PIN path:
+4- Build MICA. After this step, a directory named `obj-intel64` will be created under `$PIN_ROOT/MICA`. It will contain `mica.so` and `mica_itypes.o`.
 
 ```bash
-# Step 2
-export PIN_HOME=/path/to/pin/
+# Setup
+export PIN_ROOT=/path/to/pin/
 export PIN_FILE=/path/to/pin/file.tar.gz
-tar -xvzf $PIN_FILE -C $PIN_HOME --strip-components=1
+export GIT_REPO=/path/to/repo/profiling_tools/
 
-# Step 3
-cp -r ./MICA $PIN_HOME
+# Step 1
+tar -xvzf $PIN_FILE -C $PIN_ROOT --strip-components=1
+
+# Step 2
+cp -r $GIT_REPO/pin/MICA $PIN_ROOT
 
 # Step 4
-cd $PIN_HOME
-
-tar -xvzf your_file.tar.gz -C
-
+cd $PIN_ROOT/MICA
+make -j
 ```
+
+## Inject MICA APIs
+
+To start/end MICA instrumentation before/after your Region of Interest (ROI), copy the content of `API.h` to your ROI file. Use `BEGIN_PIN_ROI` and `END_PIN_ROI` before and after your ROI, and compile your application. Two example files are located in this directory.
+
+## Direct Instrumentation
+
+You can use the following command to run the Pin and application together:
+
