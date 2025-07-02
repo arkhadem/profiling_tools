@@ -1,1 +1,0 @@
-/sw/pkgs/arc/cuda/12.8.1/bin/ncu --import metrics_profile_b16_total.ncu-rep --page raw --csv &> metrics_profile_b16_total_raw.csv

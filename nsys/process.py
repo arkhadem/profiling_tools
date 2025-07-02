@@ -1,96 +1,187 @@
 
-# open a txt file and read the contents
-funcs_dict = {}
-func_f = open("b32_new/func.txt", "r")
-duration_f = open("b32_new/duration.txt", "r")
-bw_f = open("b32_new/bw.txt", "r")
-control_f = open("b32_new/control.txt", "r")
-occupancy_f = open("b32_new/occupancy.txt", "r")
-smutil_f = open("b32_new/smutil.txt", "r")
-AI_f = open("b32_new/AI.txt", "r")
+# get input arguments such as input tsv file, output file with argparse
+import argparse
+import os
+import sys
+parser = argparse.ArgumentParser(description='Process CUDA memory allocation and deallocation events.')
+parser.add_argument('-i', type=str, help='Input TSV directory with CUDA memory allocation and deallocation events.', required=True)
+parser.add_argument('-o', type=str, help='Output file to save the processed CUDA memory events.', required=True)
+parser.add_argument('-a', type=str, help='type of analysis to perform', choices=['watermark', 'usage', 'leakage'], default='watermark', required=False)
+parser.add_argument('--no-header', action='store_true', help='If set, the output file will have a header line.')
+args = parser.parse_args()
 
-target_funcs = ["CalculateFluxes",
-                "WeightedSumData",
-                "FirstDerivative",
-                "MassHistory",
-                "FluxDivergence",
-                "SetBounds",
-                "SendBoundBufs",
-                "EstimateTimestepMesh",
-                "ProlongationRestrictionLoop",
-                "CalculateDerived"]
+VALID_TYPE = 0
+INVALID_TYPE = 1
+DRIVER_TYPE = 2
 
-target_durations = [0.0 for _ in target_funcs]
+INVALID_ANALYSIS = True
+DRIVER_ANALYSIS = True
 
-total_d = 0.0
-total_b = 0.0
-total_c = 0.0
-total_o = 0.0
-total_s = 0.0
-total_AI = 0.0
+def extract_info(filehandle, tracetype):
+    """Extracts information from a line of the input file."""
+    line = filehandle.readline()
+    if not line:
+        return None
+    parts = line.strip().split('\t')
+    if len(parts) != 8:
+        raise ValueError(f"Line does not contain enough parts: {line}")
+    return {
+        'pid': parts[0],
+        'address': parts[1],
+        'start_time': int(parts[2]),
+        'bytes': int(parts[3]),
+        'memkind': parts[4],
+        'mem_op_type': parts[5],
+        'var_name': parts[6],
+        'stack': parts[7],
+        'tracetype': tracetype
+    }
 
-while True:
-    f = func_f.readline().rstrip().lstrip()
-    if not f:
-        break
-    d = float(duration_f.readline().rstrip().lstrip())
-    b = float(bw_f.readline().rstrip().lstrip())
-    c = float(control_f.readline().rstrip().lstrip())
-    o = float(occupancy_f.readline().rstrip().lstrip())
-    s = float(smutil_f.readline().rstrip().lstrip())
-    AI = float(AI_f.readline().rstrip().lstrip())
+curr_traces = []
 
-    found = False
-    ff = None
-    ffid = None
+infile_valid = open(f"{args.i}_valid.tsv", 'r')
+## Skipping header line
+infile_valid.readline()
+curr_traces.append(extract_info(infile_valid, VALID_TYPE))
 
-    for tfid, tf in enumerate(target_funcs):
-        if tf in f:
-            assert not found, f"{tf} and {ff} both found in {f}"
-            found = True
-            ff = tf
-            ffid = tfid
-    if not found:
+infile_invalid = None
+if INVALID_ANALYSIS:
+    infile_invalid = open(f"{args.i}_invalid.tsv", 'r')
+    infile_invalid.readline()
+    curr_traces.append(extract_info(infile_invalid, INVALID_TYPE))
+else:
+    curr_traces.append(None)
+
+infile_driver = None
+if DRIVER_ANALYSIS:
+    infile_driver = open(f"{args.i}_driver.tsv", 'r')
+    infile_driver.readline()
+    curr_traces.append(extract_info(infile_driver, DRIVER_TYPE))
+else:
+    curr_traces.append(None)
+
+outfile = open(args.o, 'w')
+
+total = [0, 0, 0]
+memory = {}
+
+max_total = [0, 0, 0]
+max_time = -1
+max_memory = {}
+
+prev_start_time = -1
+first_start_time = -1
+
+MANAGED_MEM_FOUND = False
+MANAGED_STATIC_MEM_FOUND = False
+UNKNOWN_MEM_FOUND = False
+
+if args.a == "usage" and not args.no_header:
+    outfile.write("time(ns)\ttotal (B)\tvalid (B)\tinvalid (B)\tdriver (B)\n")
+
+
+# read the file line by line
+while curr_traces[0] is not None or curr_traces[1] is not None or curr_traces[2] is not None:
+    trace = None
+
+    min_start = min(
+        trace['start_time'] if trace is not None else float('inf') for trace in curr_traces
+    )
+
+    if curr_traces[0] is not None and min_start == curr_traces[0]['start_time']:
+        trace = curr_traces[0]
+        curr_traces[0] = extract_info(infile_valid, VALID_TYPE)
+    elif curr_traces[1] is not None and min_start == curr_traces[1]['start_time']:
+        trace = curr_traces[1]
+        curr_traces[1] = extract_info(infile_invalid, INVALID_TYPE)
+    elif curr_traces[2] is not None and min_start == curr_traces[2]['start_time']:
+        trace = curr_traces[2]
+        curr_traces[2] = extract_info(infile_driver, DRIVER_TYPE)
+    else:
+        raise ValueError("No valid trace found")
+
+    if trace['memkind'] in ["CUDA_MEMOPR_MEMORY_KIND_PINNED", "CUDA_MEMOPR_MEMORY_KIND_PAGEABLE"]:
         continue
+    elif trace['memkind'] == "CUDA_MEMOPR_MEMORY_KIND_MANAGED":
+        MANAGED_MEM_FOUND = True
+    elif trace['memkind'] == "CUDA_MEMOPR_MEMORY_KIND_MANAGED_STATIC":
+        MANAGED_STATIC_MEM_FOUND = True
+    elif trace['memkind'] == "CUDA_MEMOPR_MEMORY_KIND_UNKNOWN":
+        UNKNOWN_MEM_FOUND = True
 
-    total_d += d
-    total_b += b * d
-    total_c += c * d
-    total_o += o * d
-    total_s += s * d
-    total_AI += AI * d
-    target_durations[ffid] += d
+    if first_start_time == -1:
+        first_start_time = trace['start_time']
 
-    if ff not in funcs_dict.keys():
-        funcs_dict[ff] = []
-    funcs_dict[ff].append({"duration": d, "bw": b, "control": c, "occupancy": o, "smutil": s, "AI": AI})
+    assert prev_start_time <= trace['start_time'], f"Memory operation out of order: {prev_start_time} > {trace['start_time']}"
 
-# sort target_funcs based on target_durations descending
-# target_funcs = [x for _, x in sorted(zip(target_durations, target_funcs), reverse=True)]
+    if args.a == "usage" and prev_start_time != trace['start_time'] and prev_start_time != -1:
+        outfile.write(f"{prev_start_time-first_start_time}\t{sum(total)}\t{total[0]}\t{total[1]}\t{total[2]}\n")
 
-print("Func\tDuration\tBW\tControl\tOccupancy\tSMUtil\tAI")
-for f in target_funcs:
-    d = 0.0
-    b = 0.0
-    c = 0.0
-    o = 0.0
-    s = 0.0
-    AI = 0.0
-    for v in funcs_dict[f]:
-        d += v["duration"]
-        b += (v["bw"] * v["duration"])
-        c += (v["control"] * v["duration"])
-        o += (v["occupancy"] * v["duration"])
-        s += (v["smutil"] * v["duration"])
-        AI += (v["AI"] * v["duration"])
-    print(f"\"{f}\"\t{d}\t{b/d}\t{c/d}\t{o/d}\t{s/d}\t{AI/d}")
+    prev_start_time = trace['start_time']
 
-print(f"Total\t{total_d}\t{total_b/total_d}\t{total_c/total_d}\t{total_o/total_d}\t{total_s/total_d}\t{total_AI/total_d}")
+    if args.a == "usage":
+        if trace['mem_op_type'] == "CUDA_DEV_MEM_EVENT_OPR_ALLOCATION":
+            total[trace['tracetype']] += trace['bytes']
+        elif trace['mem_op_type'] == "CUDA_DEV_MEM_EVENT_OPR_DEALLOCATION":
+            total[trace['tracetype']] -= trace['bytes']
+        else:
+            raise ValueError(f"Unknown memory operation type: {trace['mem_op_type']}")
+    elif args.a == "watermark" or args.a == "leakage":
+        key = f"{trace['pid']}_{trace['address']}_{trace['memkind']}"
+        if trace['mem_op_type'] == "CUDA_DEV_MEM_EVENT_OPR_ALLOCATION":
+            total[trace['tracetype']] += trace['bytes']
+            assert key not in memory, f"Error: {key} already allocated"
+            memory[key] = trace.copy()
+            if args.a == "watermark" and sum(total) > sum(max_total):
+                max_time = trace['start_time']
+                max_total = total.copy()
+                max_memory = memory.copy()
+        elif trace['mem_op_type'] == "CUDA_DEV_MEM_EVENT_OPR_DEALLOCATION":
+            total[trace['tracetype']] -= trace['bytes']
+            assert key in memory, f"Error: {key} not allocated"
+            assert trace['bytes'] == memory[key]['bytes'], f"Error: {key} deallocated with different size {trace['bytes']} != {memory[key]['bytes']}"
+            del memory[key]
+        else:
+            raise ValueError(f"Unknown memory operation type: {trace['mem_op_type']}")
 
-func_f.close()
-duration_f.close()
-bw_f.close()
-control_f.close()
-occupancy_f.close()
-smutil_f.close()
-AI_f.close()
+if args.a == "usage":
+    print (f"total leakage: {total} bytes")
+elif args.a == "watermark":
+    total = [0, 0, 0]
+    mpi = [0, 0, 0]
+    if not args.no_header:
+        outfile.write("address\tstart_time\tbytes\tmemkind\tmem_op_type\tvar_name\ttrace_type\tstack\n")
+    for item in max_memory.values():
+        if "openmpi" in item['stack'] or "libToolsInjectionOpenMPI64" in item['stack']:
+            mpi[item['tracetype']] += item['bytes']
+        elif "mpi" in item['stack'].lower():
+            print(f"Warning: {item['stack']} contains 'mpi' but not 'openmpi' or 'libToolsInjectionOpenMPI64'")
+        total[item['tracetype']] += item['bytes']
+        outfile.write(f"{item['address']}\t{item['start_time']}\t{item['bytes']}\t{item['memkind']}\t{item['mem_op_type']}\t{item['var_name']}\t{item['tracetype']}\t{item['stack']}\n")
+    print (f"high water mark:\n\ttotal: {sum(max_total)} bytes\n\tvalid: {max_total[0]} bytes\n\tinvalid: {max_total[1]} bytes\n\tdriver: {max_total[2]} bytes")
+    print (f"high water mark time: {max_time} ms")
+    print (f"mpi allocated memory:\n\ttotal: {sum(mpi)} bytes\n\tvalid: {mpi[0]} bytes\n\tinvalid: {mpi[1]} bytes\n\tdriver: {mpi[2]} bytes")
+    print (f"aggregated itemized high water mark:\n\ttotal: {sum(total)} bytes\n\tvalid: {total[0]} bytes\n\tinvalid: {total[1]} bytes\n\tdriver: {total[2]} bytes")
+elif args.a == "leakage":
+    print (f"leakage:\n\ttotal: {sum(total)} bytes\n\tvalid: {total[0]} bytes\n\tinvalid: {total[1]} bytes\n\tdriver: {total[2]} bytes")
+    itemized_leakage = [0, 0, 0]
+    if not args.no_header:
+        outfile.write("address\tstart_time\tbytes\tmemkind\tmem_op_type\tvar_name\ttrace_type\tstack\n")
+    for item in memory.values():
+        itemized_leakage[item['tracetype']] += item['bytes']
+        outfile.write(f"{item['address']}\t{item['start_time']}\t{item['bytes']}\t{item['memkind']}\t{item['mem_op_type']}\t{item['var_name']}\t{item['tracetype']}\t{item['stack']}\n")
+    print (f"aggregated itemized leakage:\n\ttotal: {sum(itemized_leakage)} bytes\n\tvalid: {itemized_leakage[0]} bytes\n\tinvalid: {itemized_leakage[1]} bytes\n\tdriver: {itemized_leakage[2]} bytes")
+
+if MANAGED_MEM_FOUND:
+    print("Warning: managed memory found in traces. Managed memory could be allocated on host or device. Report might not be accurate.")
+if MANAGED_STATIC_MEM_FOUND:
+    print("Warning: managed static memory found in traces. Managed static memory is allocated on host and can be used by device. Report might not be accurate.")
+if UNKNOWN_MEM_FOUND:
+    print("Warning: unknown memory kind found in traces. Report might not be accurate.")
+
+infile_valid.close()
+if infile_invalid is not None:
+    infile_invalid.close()
+if infile_driver is not None:
+    infile_driver.close()
+outfile.close()
